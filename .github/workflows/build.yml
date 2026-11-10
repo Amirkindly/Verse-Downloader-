@@ -1,0 +1,81 @@
+name: Build Verse Downloader APK
+
+on:
+  push:
+    branches: [ main, master ]
+    paths-ignore: [ '**.md', 'LICENSE' ]
+  workflow_dispatch:
+
+# اگر پشت‌سرهم چند بار push شد، بیلدهای قدیمی لغو می‌شوند
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find project
+        run: |
+          set -eu
+          # اگر پروژه به‌صورت zip آپلود شده، بازش کن (بدون فایل‌های زباله‌ی مک)
+          i=0
+          while IFS= read -r -d '' z; do
+            i=$((i+1))
+            echo "Unzipping: $z"
+            mkdir -p "src_unzipped/$i"
+            unzip -q -o "$z" -x '__MACOSX/*' -d "src_unzipped/$i"
+          done < <(find . -iname '*.zip' -not -path './.git/*' -not -path './src_unzipped/*' -print0)
+
+          # اول پروژه‌ی بازشده‌ی داخل ریپو، بعد داخل zip
+          SETTINGS=$(find . -name 'settings.gradle.kts' -not -path './.git/*' -not -path './src_unzipped/*' -not -path '*/build/*' | head -1)
+          if [ -z "$SETTINGS" ] && [ -d src_unzipped ]; then
+            SETTINGS=$(find src_unzipped -name 'settings.gradle.kts' -not -path '*/build/*' | head -1)
+          fi
+          if [ -z "$SETTINGS" ]; then
+            echo "::error::settings.gradle.kts not found (upload the project or its zip to the repo)"
+            exit 1
+          fi
+          DIR=$(cd "$(dirname "$SETTINGS")" && pwd)
+          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
+          echo "Project dir: $DIR"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+          add-job-summary: on-failure
+
+      - name: Build debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: gradle :app:assembleDebug --no-daemon --console=plain --stacktrace
+
+      - name: Collect APK
+        run: |
+          set -eu
+          APK=$(find "$PROJECT_DIR/app/build/outputs/apk/debug" -name '*.apk' | head -1)
+          if [ -z "$APK" ]; then
+            echo "::error::APK not found after build"
+            exit 1
+          fi
+          mkdir -p dist
+          cp "$APK" dist/VerseDownloader.apk
+          echo "### VerseDownloader.apk — $(du -h dist/VerseDownloader.apk | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VerseDownloader-apk
+          path: dist/VerseDownloader.apk
+          if-no-files-found: error
+          compression-level: 0   # APK از قبل فشرده است
+          retention-days: 30
